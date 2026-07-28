@@ -10,7 +10,10 @@
 # Arguments:
 #   source-directory: Path to mvn-parent-jdk17 repository root (default: parent of script dir)
 
-set -e
+set -euo pipefail
+
+# Enable debug/trace mode when DEBUG=1
+[ "${DEBUG:-0}" = "1" ] && set -x
 
 # Redirect stdin from TTY if running via pipe
 if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
@@ -18,15 +21,21 @@ if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
 fi
 
 # Determine source directory (this repo)
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
     SOURCE_DIR="$1"
 else
     # Default: parent directory of this script
-    SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+    SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)" || {
+        echo "❌ Error: Cannot resolve script directory"
+        exit 1
+    }
 fi
 
 # Resolve to absolute path
-SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)" || {
+    echo "❌ Error: Cannot access source directory: $SOURCE_DIR"
+    exit 1
+}
 TARGET_DIR="$(pwd)"
 
 echo "╔══════════════════════════════════════════════════════════╗"
@@ -59,13 +68,62 @@ echo "mvn-parent-jdk17 requires an existing mvn-parent installation."
 echo "Please provide the location of your mvn-parent repository."
 echo ""
 
-read -p "Use [local] filesystem path or [remote] git URL? (default: local): " SOURCE_MODE
+read -rp "Use [local] filesystem path or [remote] git URL? (default: local): " SOURCE_MODE
 SOURCE_MODE=${SOURCE_MODE:-local}
 
 PARENT_SOURCE_DIR=""
 TEMP_PARENT_DIR=""
 
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+# Validate a filesystem path: must be absolute, no whitespace or shell metacharacters
+validate_path() {
+    local input="$1" label="${2:-Path}"
+    if [[ -z "$input" ]]; then
+        echo "❌ Error: $label cannot be empty"
+        return 1
+    fi
+    if [[ "$input" != /* ]]; then
+        echo "❌ Error: $label must be an absolute path (got: $input)"
+        return 1
+    fi
+    if [[ "$input" =~ [[:space:]\;\|\&\`\$\(\)\<\>] ]]; then
+        echo "❌ Error: $label contains invalid characters"
+        return 1
+    fi
+}
+
+# Validate a Maven coordinate: only alphanumerics, dots, hyphens, underscores
+validate_maven_coord() {
+    local input="$1" label="${2:-Coordinate}"
+    if [[ -z "$input" ]]; then
+        echo "❌ Error: $label cannot be empty"
+        return 1
+    fi
+    if [[ ! "$input" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "❌ Error: $label '${input}' is invalid (only a-z A-Z 0-9 . _ - allowed)"
+        return 1
+    fi
+}
+
+# Validate a git URL: HTTPS-only, no shell metacharacters
+validate_git_https_url() {
+    local url="$1"
+    if [[ -z "$url" ]]; then
+        echo "❌ Error: Repository URL cannot be empty"
+        return 1
+    fi
+    if [[ ! "$url" =~ ^https://[a-zA-Z0-9._/:-]+$ ]]; then
+        echo "❌ Error: Only HTTPS git URLs are allowed (e.g., https://github.com/user/repo)"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup function for temporary parent directory
+# ---------------------------------------------------------------------------
 cleanup() {
     if [ -n "$TEMP_PARENT_DIR" ] && [ -d "$TEMP_PARENT_DIR" ]; then
         echo "🧹 Cleaning up temporary parent directory..."
@@ -76,11 +134,12 @@ trap cleanup EXIT
 
 case "$SOURCE_MODE" in
     local)
-        read -p "Enter absolute path to mvn-parent repository: " PARENT_SOURCE_DIR
+        read -rp "Enter absolute path to mvn-parent repository: " PARENT_SOURCE_DIR
         if [ -z "$PARENT_SOURCE_DIR" ]; then
             echo "❌ Error: mvn-parent path is required"
             exit 1
         fi
+        validate_path "$PARENT_SOURCE_DIR" "mvn-parent path" || exit 1
         # Resolve to absolute path
         PARENT_SOURCE_DIR="$(cd "$PARENT_SOURCE_DIR" && pwd)" || {
             echo "❌ Error: Directory not found: $PARENT_SOURCE_DIR"
@@ -88,17 +147,22 @@ case "$SOURCE_MODE" in
         }
         ;;
     remote)
-        read -p "Enter git repository URL for mvn-parent: " PARENT_REPO_URL
+        read -rp "Enter git repository URL for mvn-parent: " PARENT_REPO_URL
         if [ -z "$PARENT_REPO_URL" ]; then
             echo "❌ Error: mvn-parent repository URL is required"
             exit 1
         fi
+        validate_git_https_url "$PARENT_REPO_URL" || exit 1
         echo "📦 Cloning mvn-parent repository..."
         TEMP_PARENT_DIR=$(mktemp -d)
-        git clone --depth 1 "$PARENT_REPO_URL" "$TEMP_PARENT_DIR" 2>/dev/null || {
+        _clone_err=$(mktemp)
+        git clone --depth 1 "$PARENT_REPO_URL" "$TEMP_PARENT_DIR" 2>"$_clone_err" || {
             echo "❌ Error: Failed to clone repository: $PARENT_REPO_URL"
+            cat "$_clone_err" >&2
+            rm -f "$_clone_err"
             exit 1
         }
+        rm -f "$_clone_err"
         PARENT_SOURCE_DIR="$TEMP_PARENT_DIR"
         echo "✅ Cloned to: $TEMP_PARENT_DIR"
         ;;
@@ -137,7 +201,8 @@ try:
     root = ET.parse(pom).getroot()
     el = root.find(f"m:{tag}", ns)
     if el is not None and el.text: print(el.text.strip())
-except: pass
+except Exception as e:
+    sys.stderr.write(str(e) + "\n")
 PY
         )
     fi
@@ -164,14 +229,6 @@ if [ -z "$PARENT_GROUP_ID" ] || [ -z "$PARENT_VERSION" ]; then
     exit 1
 fi
 
-PARENT_GROUP_ID=$(extract_pom_value "$PARENT_SOURCE_DIR/pom.xml" "groupId")
-PARENT_VERSION=$(extract_pom_value "$PARENT_SOURCE_DIR/pom.xml" "version")
-
-if [ -z "$PARENT_GROUP_ID" ] || [ -z "$PARENT_VERSION" ]; then
-    echo "❌ Error: Failed to extract groupId or version from parent pom.xml"
-    exit 1
-fi
-
 echo "✅ Extracted parent coordinates:"
 echo "   GroupId: $PARENT_GROUP_ID"
 echo "   Version: $PARENT_VERSION"
@@ -188,8 +245,9 @@ echo "If you use the same groupId as parent, it will be omitted"
 echo "(inherited from parent POM automatically)."
 echo ""
 
-read -p "Enter module groupId [default: io.xprevel.jdk17]: " MODULE_GROUP_ID
+read -rp "Enter module groupId [default: io.xprevel.jdk17]: " MODULE_GROUP_ID
 MODULE_GROUP_ID=${MODULE_GROUP_ID:-io.xprevel.jdk17}
+validate_maven_coord "$MODULE_GROUP_ID" "Module groupId" || exit 1
 
 if [ "$MODULE_GROUP_ID" = "$PARENT_GROUP_ID" ]; then
     MODULE_GROUP_ID_ACTION="omit"
@@ -211,9 +269,9 @@ echo "  Module GroupId:     $MODULE_GROUP_ID ($MODULE_GROUP_ID_ACTION)"
 echo "  Install Directory:  $TARGET_DIR"
 echo ""
 
-read -p "Proceed with installation? (y/N): " CONFIRM
+read -rp "Proceed with installation? (y/N): " CONFIRM
 
-if [[ ! $CONFIRM =~ ^[Yy]$ ]]; then
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     echo "Installation cancelled."
     exit 0
 fi
@@ -229,13 +287,26 @@ echo "📋 Copying project files..."
 cp "$SOURCE_DIR/pom.xml" "$TARGET_DIR/pom.xml"
 echo "   ✓ pom.xml"
 
-cp "$SOURCE_DIR/.gitignore" "$TARGET_DIR/.gitignore" 2>/dev/null && echo "   ✓ .gitignore" || true
-cp "$SOURCE_DIR/LICENSE" "$TARGET_DIR/LICENSE" 2>/dev/null && echo "   ✓ LICENSE" || true
+if [ -f "$SOURCE_DIR/.gitignore" ]; then
+    cp "$SOURCE_DIR/.gitignore" "$TARGET_DIR/.gitignore"
+    echo "   ✓ .gitignore"
+fi
+if [ -f "$SOURCE_DIR/LICENSE" ]; then
+    cp "$SOURCE_DIR/LICENSE" "$TARGET_DIR/LICENSE"
+    echo "   ✓ LICENSE"
+fi
 
 # Copy .env file - try parent directory first, then ~/.m2
 echo ""
 echo "📋 Looking for .env file..."
 ENV_COPIED=false
+
+# Ensure HOME is set and valid before accessing ~/.m2
+: "${HOME:?HOME environment variable is not set}"
+if [ ! -d "$HOME" ]; then
+    echo "❌ Error: HOME directory does not exist: $HOME"
+    exit 1
+fi
 
 if [ -f "$PARENT_SOURCE_DIR/.env" ]; then
     cp "$PARENT_SOURCE_DIR/.env" "$TARGET_DIR/.env"
@@ -261,7 +332,7 @@ echo "📋 Looking for .mvn/maven.config..."
 MAVEN_CONFIG_COPIED=false
 
 if [ -f "$PARENT_SOURCE_DIR/.mvn/maven.config" ]; then
-    mkdir -p "$TARGET_DIR/.mvn"
+    mkdir -p "$TARGET_DIR/.mvn" || { echo "❌ Error: Failed to create .mvn directory"; exit 1; }
     cp "$PARENT_SOURCE_DIR/.mvn/maven.config" "$TARGET_DIR/.mvn/maven.config"
     echo "   ✓ .mvn/maven.config (from mvn-parent repository)"
     MAVEN_CONFIG_COPIED=true
@@ -317,7 +388,8 @@ try:
     print(f"   ✓ Updated parent groupId: {p_gid}")
     print(f"   ✓ Updated parent version: {p_ver}")
     tree.write(pom, encoding="utf-8", xml_declaration=True)
-except: sys.exit(1)
+except Exception as e:
+    sys.stderr.write(str(e) + "\n"); sys.exit(1)
 PY
     fi
     
@@ -359,7 +431,6 @@ PY
     echo "   ✓ Updated parent groupId: $parent_gid"
     echo "   ✓ Updated parent version: $parent_ver"
     
-    rm -f "$pom_file.bak"
     return 0
 }
 
