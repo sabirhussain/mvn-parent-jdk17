@@ -66,9 +66,10 @@ Use this method to install from anywhere:
 ```bash
 # Navigate to your desired installation directory
 cd /path/to/installation/directory
-
+```
+```bash
 # Run the remote installer
-curl -fsSL https://raw.githubusercontent.com/sabirhussain/mvn-parent-jdk17/main/install/install.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sabirhussain/mvn-parent-jdk17/main/install/install.sh)
 ```
 
 The installer will prompt you for:
