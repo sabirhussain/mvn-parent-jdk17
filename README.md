@@ -123,7 +123,7 @@ After installation, you'll have these files in your installation directory:
 .
 ├── pom.xml       # Customized with your parent coordinates
 ├── .gitignore    # Standard Java .gitignore
-├── LICENSE       # Apache 2.0 License
+├── LICENSE       # GNU GPL v3 License
 ├── .env          # Environment variables copied from mvn-parent or ~/.m2
 └── .mvn/
     └── maven.config  # Copied from mvn-parent if present
@@ -255,7 +255,7 @@ mvn deploy
 
 ## License
 
-Apache License 2.0 - See LICENSE file for details.
+GNU General Public License v3.0 - See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
